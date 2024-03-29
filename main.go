@@ -4,12 +4,21 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"io"
+	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v2"
 )
+
+type ProgramArgs struct {
+	source string
+}
+
+type RouteMap = map[string]string
 
 type Route struct {
 	Path string `yaml:"path" json:"path"`
@@ -34,15 +43,78 @@ func ReadAll(r io.Reader) ([]byte, error) {
 	}
 }
 
-func main() {
+func getArgs() *ProgramArgs {
+
 	sourcePtr := flag.String("source", "", "path of file to be parsed")
+
 	flag.Parse()
 
-	filePath := *sourcePtr
+	source := *sourcePtr
 
-	file, err := os.Open(filePath)
+	return &ProgramArgs{
+		source: source,
+	}
 
-	fileType := filepath.Ext(filePath)
+}
+
+func setupRouteMap(routes Routes) RouteMap {
+	routeMap := make(RouteMap)
+
+	for _, route := range routes {
+		routeMap[route.Path] = route.URL
+	}
+
+	return routeMap
+}
+
+func handlerFuncGenerator(routeMap RouteMap) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if url, exists := routeMap[path]; exists {
+			http.Redirect(w, r, url, http.StatusPermanentRedirect)
+		}else{
+			data , _ := json.Marshal(struct{
+				User_agent string `json:"user_agent"`
+				Host string	`json:"host"`
+				Method string `json:"method"`
+
+			}{
+				User_agent:  r.UserAgent(),
+				Host: r.Host,
+				Method: r.Method,
+
+			})
+			fmt.Fprintf(w,"hello %v" , html.UnescapeString(string(data)) )
+		}
+	}
+}
+
+func parseRoutes(file *os.File) Routes {
+	fileType := filepath.Ext(file.Name())
+	temp := Routes{}
+	if byteSlice, err := ReadAll(file); err == io.EOF && len(byteSlice) != 0 {
+
+		switch fileType {
+			case ".yaml" :
+				if err := yaml.Unmarshal(byteSlice, &temp); err != nil {
+					fmt.Println("Error:", err)
+					os.Exit(1)
+				}
+			case ".json" :
+				if err := json.Unmarshal(byteSlice, &temp); err != nil {
+					fmt.Println("Error:", err)
+					os.Exit(1)
+				}
+		}
+	}
+	return temp
+}
+
+func main() {
+
+	flags := getArgs()
+
+	file, err := os.Open(flags.source)
 
 	if err != nil {
 		fmt.Println("Error:", err)
@@ -50,22 +122,9 @@ func main() {
 	}
 	defer file.Close()
 
-	var data Routes
-	if byteSlice, err := ReadAll(file); err == io.EOF && len(byteSlice) != 0 {
-		if fileType == ".yaml" {
-			if err := yaml.Unmarshal(byteSlice, &data); err != nil {
-				fmt.Println("Error:", err)
-				os.Exit(1)
-			}
-		}
-		if fileType == ".json" {
-			if err := json.Unmarshal(byteSlice, &data); err != nil {
-				fmt.Println("Error:", err)
-				os.Exit(1)
-			}
+	parsedRoutes := parseRoutes(file)
+	routeMap := setupRouteMap(parsedRoutes)
 
-		}
-	}
-	fmt.Println(data)
-
+	http.HandleFunc("/", handlerFuncGenerator(routeMap))
+	log.Fatal(http.ListenAndServe(":8800", nil))
 }
